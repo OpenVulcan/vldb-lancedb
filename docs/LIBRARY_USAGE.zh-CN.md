@@ -239,6 +239,47 @@ typedef struct VldbLancedbByteBuffer {
 
 释放这块内存。
 
+### 5.4 FFI runtime 执行模型与兼容性
+
+从 2026-04 的修复开始，FFI 层不再让外部宿主线程直接在全局 Tokio runtime 上反复 `block_on`。
+
+当前实现改为：
+
+- 一个固定后台 worker 线程
+- 一个由该线程独占的 `current_thread` Tokio runtime
+- 所有 FFI async 调用通过 channel 投递给该 worker 执行
+
+这样调整的直接原因，是为了修复某些集成场景下可能出现的：
+
+- `EnterGuard values dropped out of order`
+
+这类问题主要出现在：
+
+- Go + purego
+- 多线程宿主
+- 同进程反复初始化 / 关闭 runtime / engine
+
+兼容性结论如下：
+
+- **ABI 不变**
+  - 已有导出符号未变
+  - `include/vldb_lancedb.h` 不需要调用方重写绑定
+- **调用方式不变**
+  - 现有 `Runtime -> Engine -> 操作 -> Destroy` 顺序继续有效
+- **gRPC 模式不受影响**
+  - 本次调整只作用于 `ffi.rs`
+  - 不改变 `main.rs` 的服务模式运行时
+- **Rust 直接嵌入不受影响**
+  - 直接调用 `runtime::LanceDbRuntime` / `engine::LanceDbEngine` 的 typed Rust API 不经过这层 FFI worker
+
+需要如实说明的一点是：
+
+- FFI 入口现在会在 worker 线程上串行调度
+- 因此对于“多个宿主线程同时大量发起 FFI 调用”的极端场景，入口层并行度会低于旧实现
+- 但当前多数本地嵌入宿主更关注稳定性、生命周期一致性和跨语言可预测行为，因此这个折中是有意选择
+
+如果后续需要在 **保持稳定性** 的前提下进一步恢复更高 FFI 并发度，应在专用 worker 模型之上继续演进，而不是回退到“宿主线程直接 `block_on` 全局 runtime”的旧做法。
+
 ---
 
 ## 6. Runtime 相关接口

@@ -524,6 +524,31 @@ The example runs: `CreateTable` → `VectorUpsert` → `VectorSearch` → `Delet
 - Rust `1.94.0` is required; older versions will fail to compile
 - Use `s3+ddb://` for multi-instance deployments
 
+### FFI Runtime Compatibility Note
+
+As of the 2026-04 FFI runtime fix, the dynamic-library entry path now uses:
+
+- one dedicated worker thread
+- one `current_thread` Tokio runtime owned by that worker
+- channel-based dispatch for all async FFI operations
+
+This change fixes cross-language host crashes such as:
+
+- `EnterGuard values dropped out of order`
+
+Compatibility impact:
+
+- exported symbols remain unchanged
+- the public header and FFI signatures remain unchanged
+- gRPC service mode is unaffected
+- direct Rust `lib` embedding is unaffected
+
+One trade-off is worth noting:
+
+- FFI entry calls are now serialized through the worker thread
+- so extremely high-concurrency FFI hosts may observe lower cross-thread parallel throughput than the previous implementation
+- in return, runtime lifecycle behavior is significantly more stable for Go / purego and other native hosts
+
 ### Caller Example (Pseudocode)
 
 ```protobuf

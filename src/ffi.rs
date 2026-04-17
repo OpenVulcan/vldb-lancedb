@@ -11,6 +11,8 @@ use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char};
 use std::ptr;
 use std::sync::OnceLock;
+use std::sync::mpsc;
+use std::thread;
 
 thread_local! {
     /// 线程局部错误缓冲区，保存最近一次 FFI 调用失败信息。
@@ -44,6 +46,16 @@ pub struct VldbLancedbRuntimeHandle {
 pub struct VldbLancedbEngineHandle {
     inner: LanceDbEngine,
 }
+
+/// FFI Tokio worker，负责在固定后台线程内串行调度所有异步库调用。
+/// FFI Tokio worker responsible for serially dispatching all async library calls on one dedicated background thread.
+struct FfiRuntimeWorker {
+    sender: mpsc::Sender<FfiRuntimeJob>,
+}
+
+/// FFI worker job，封装一次需要在专用 Tokio runtime 中执行的同步任务。
+/// FFI worker job encapsulating one synchronous task that must run inside the dedicated Tokio runtime.
+type FfiRuntimeJob = Box<dyn FnOnce(&tokio::runtime::Runtime) + Send + 'static>;
 
 /// FFI 字节缓冲区，供调用方读取原始 bytes 结果。
 /// FFI byte buffer used by callers to consume raw byte results.
@@ -230,8 +242,9 @@ pub extern "C" fn vldb_lancedb_runtime_open_default_engine(
     let Some(runtime) = runtime_handle_ref(handle) else {
         return ptr::null_mut();
     };
+    let runtime = runtime.inner.clone();
 
-    match ffi_block_on(runtime.inner.open_default_engine()) {
+    match ffi_block_on(move || async move { runtime.open_default_engine().await }) {
         Ok(engine) => Box::into_raw(Box::new(VldbLancedbEngineHandle { inner: engine })),
         Err(message) => {
             set_last_error(message);
@@ -260,8 +273,11 @@ pub extern "C" fn vldb_lancedb_runtime_open_named_engine(
             return ptr::null_mut();
         }
     };
+    let runtime = runtime.inner.clone();
 
-    match ffi_block_on(runtime.inner.open_named_engine(database_name.as_deref())) {
+    match ffi_block_on(
+        move || async move { runtime.open_named_engine(database_name.as_deref()).await },
+    ) {
         Ok(engine) => Box::into_raw(Box::new(VldbLancedbEngineHandle { inner: engine })),
         Err(message) => {
             set_last_error(message);
@@ -331,8 +347,9 @@ pub extern "C" fn vldb_lancedb_engine_create_table_json(
             return ptr::null_mut();
         }
     };
+    let engine = engine.inner.clone();
 
-    match ffi_block_on(engine.inner.create_table(input)) {
+    match ffi_block_on(move || async move { engine.create_table(input).await }) {
         Ok(result) => json_string_response(serde_json::json!({
             "success": true,
             "message": result.message,
@@ -374,8 +391,9 @@ pub extern "C" fn vldb_lancedb_engine_vector_upsert(
             return ptr::null_mut();
         }
     };
+    let engine = engine.inner.clone();
 
-    match ffi_block_on(engine.inner.vector_upsert(input)) {
+    match ffi_block_on(move || async move { engine.vector_upsert(input).await }) {
         Ok(result) => json_string_response(serde_json::json!({
             "success": true,
             "message": result.message,
@@ -424,8 +442,9 @@ pub extern "C" fn vldb_lancedb_engine_vector_upsert_raw(
             data: copy_input_bytes(data, data_len)?,
             key_columns,
         };
+        let engine = engine.inner.clone();
 
-        let result = ffi_block_on(engine.inner.vector_upsert(input))?;
+        let result = ffi_block_on(move || async move { engine.vector_upsert(input).await })?;
         Ok(VldbLancedbUpsertResultPod {
             version: result.version,
             input_rows: result.input_rows,
@@ -484,8 +503,9 @@ pub extern "C" fn vldb_lancedb_engine_vector_search(
             return ptr::null_mut();
         }
     };
+    let engine = engine.inner.clone();
 
-    match ffi_block_on(engine.inner.vector_search(input)) {
+    match ffi_block_on(move || async move { engine.vector_search(input).await }) {
         Ok(result) => {
             let data = allocate_byte_buffer(result.data);
             // SAFETY: `output_data` is checked non-null above and points to caller-owned writable memory.
@@ -549,8 +569,9 @@ pub extern "C" fn vldb_lancedb_engine_vector_search_f32(
             vector_column,
             output_format: parse_ffi_output_format(output_format),
         };
+        let engine = engine.inner.clone();
 
-        let result = ffi_block_on(engine.inner.vector_search(search_input))?;
+        let result = ffi_block_on(move || async move { engine.vector_search(search_input).await })?;
         let buffer = allocate_byte_buffer(result.data);
         let meta = VldbLancedbSearchResultMeta {
             format: ffi_output_format_code(result.format),
@@ -601,8 +622,9 @@ pub extern "C" fn vldb_lancedb_engine_delete_json(
         table_name: input.table_name,
         condition: input.condition,
     };
+    let engine = engine.inner.clone();
 
-    match ffi_block_on(engine.inner.delete(input)) {
+    match ffi_block_on(move || async move { engine.delete(input).await }) {
         Ok(result) => json_string_response(serde_json::json!({
             "success": true,
             "message": result.message,
@@ -640,8 +662,9 @@ pub extern "C" fn vldb_lancedb_engine_drop_table_json(
     let input = LanceDbDropTableInput {
         table_name: input.table_name,
     };
+    let engine = engine.inner.clone();
 
-    match ffi_block_on(engine.inner.drop_table(input)) {
+    match ffi_block_on(move || async move { engine.drop_table(input).await }) {
         Ok(result) => json_string_response(serde_json::json!({
             "success": true,
             "message": result.message,
@@ -1085,32 +1108,80 @@ fn normalize_non_zero(value: usize, default_value: usize) -> usize {
     if value == 0 { default_value } else { value }
 }
 
-/// 返回全局 FFI Tokio runtime。
-/// Return the global FFI Tokio runtime.
-fn ffi_runtime() -> Result<&'static tokio::runtime::Runtime, String> {
-    static FFI_RUNTIME: OnceLock<Result<tokio::runtime::Runtime, String>> = OnceLock::new();
+/// 返回全局 FFI Tokio worker。
+/// Return the global FFI Tokio worker.
+fn ffi_runtime_worker() -> Result<&'static FfiRuntimeWorker, String> {
+    static FFI_RUNTIME_WORKER: OnceLock<Result<FfiRuntimeWorker, String>> = OnceLock::new();
 
-    match FFI_RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .thread_name("vldb-lancedb-ffi")
-            .build()
-            .map_err(|error| format!("failed to build FFI runtime: {error}"))
+    match FFI_RUNTIME_WORKER.get_or_init(|| {
+        let (job_tx, job_rx) = mpsc::channel::<FfiRuntimeJob>();
+        let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<(), String>>(1);
+
+        thread::Builder::new()
+            .name("vldb-lancedb-ffi-dispatch".to_string())
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .thread_name("vldb-lancedb-ffi")
+                    .build()
+                {
+                    Ok(runtime) => {
+                        let _ = ready_tx.send(Ok(()));
+                        runtime
+                    }
+                    Err(error) => {
+                        let _ = ready_tx.send(Err(format!("failed to build FFI runtime: {error}")));
+                        return;
+                    }
+                };
+
+                while let Ok(job) = job_rx.recv() {
+                    // Keep the worker thread alive even if one specific dispatched job panics,
+                    // so later FFI calls can still receive a deterministic error instead of losing the runtime entirely.
+                    // 即使单次任务 panic，也尽量保持 worker 线程存活，
+                    // 让后续 FFI 调用至少还能拿到确定性错误，而不是把整个 runtime 一起打死。
+                    let _ =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(&runtime)));
+                }
+            })
+            .map_err(|error| format!("failed to spawn FFI runtime worker: {error}"))?;
+
+        match ready_rx.recv() {
+            Ok(Ok(())) => Ok(FfiRuntimeWorker { sender: job_tx }),
+            Ok(Err(message)) => Err(message),
+            Err(_) => Err("failed to receive FFI runtime worker startup signal".to_string()),
+        }
     }) {
-        Ok(runtime) => Ok(runtime),
+        Ok(worker) => Ok(worker),
         Err(message) => Err(message.clone()),
     }
 }
 
-/// 在全局 FFI runtime 中执行异步任务。
-/// Execute an async task inside the global FFI runtime.
-fn ffi_block_on<F, T, E>(future: F) -> Result<T, String>
+/// 在全局 FFI worker 中执行异步任务。
+/// Execute an async task inside the global FFI worker.
+fn ffi_block_on<BuildFuture, F, T, E>(build_future: BuildFuture) -> Result<T, String>
 where
-    F: std::future::Future<Output = Result<T, E>>,
-    E: std::fmt::Display,
+    BuildFuture: FnOnce() -> F + Send + 'static,
+    F: std::future::Future<Output = Result<T, E>> + Send + 'static,
+    T: Send + 'static,
+    E: std::fmt::Display + Send + 'static,
 {
-    let runtime = ffi_runtime()?;
-    runtime.block_on(future).map_err(|error| error.to_string())
+    let worker = ffi_runtime_worker()?;
+    let (result_tx, result_rx) = mpsc::sync_channel::<Result<T, String>>(1);
+
+    worker
+        .sender
+        .send(Box::new(move |runtime| {
+            let outcome = runtime
+                .block_on(build_future())
+                .map_err(|error| error.to_string());
+            let _ = result_tx.send(outcome);
+        }))
+        .map_err(|_| "FFI runtime worker has stopped".to_string())?;
+
+    result_rx
+        .recv()
+        .map_err(|_| "FFI runtime worker dropped the response channel".to_string())?
 }
 
 /// 记录最近一次错误。
@@ -1140,12 +1211,13 @@ fn sanitize_message(message: impl Into<String>) -> String {
 mod tests {
     use super::{
         CreateTableJsonInput, SearchJsonInput, UpsertJsonInput, VldbLancedbRuntimeOptions,
-        allocate_byte_buffer, build_runtime_from_options, default_search_limit,
+        allocate_byte_buffer, build_runtime_from_options, default_search_limit, ffi_block_on,
         map_create_table_input, map_search_input, map_upsert_input, normalize_non_zero,
         parse_column_type, parse_input_format, parse_output_format, sanitize_message,
         vldb_lancedb_bytes_free, vldb_lancedb_runtime_options_default,
     };
     use std::ffi::CString;
+    use std::thread;
 
     #[test]
     fn runtime_options_default_exposes_engine_defaults() {
@@ -1267,5 +1339,31 @@ mod tests {
         .expect("search input should map");
         assert_eq!(search_input.limit, 3);
         assert_eq!(search_input.vector_column, "embedding");
+    }
+
+    #[test]
+    fn ffi_block_on_dispatches_cross_thread_jobs_without_enter_guard_panics() {
+        let mut handles = Vec::new();
+        for thread_index in 0..6usize {
+            handles.push(thread::spawn(move || {
+                for call_index in 0..12usize {
+                    let expected = thread_index * 100 + call_index;
+                    let value = ffi_block_on(move || async move {
+                        let value = tokio::task::spawn_blocking(move || expected)
+                            .await
+                            .map_err(|error| std::io::Error::other(error.to_string()))?;
+                        Ok::<usize, std::io::Error>(value)
+                    })
+                    .expect("ffi worker should execute the dispatched future");
+                    assert_eq!(value, expected);
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle
+                .join()
+                .expect("cross-thread ffi caller should finish");
+        }
     }
 }

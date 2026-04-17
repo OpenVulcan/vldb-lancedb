@@ -168,6 +168,36 @@ cargo run --release -- --config ./vldb-lancedb.json
 
 这样可以在保持 ABI 简洁的前提下，让 Lua/MCP/manager 等非 Rust 调用方直接完成核心表操作。
 
+### FFI runtime 修复说明
+
+2026-04 的这一轮修复中，FFI 层已经把异步执行模型调整为：
+
+- 固定后台 worker 线程
+- 独占 `current_thread` Tokio runtime
+- 所有 FFI async 调用通过 worker 串行调度
+
+这次调整的目的，是修复 Go / purego / 多线程宿主下可能出现的：
+
+- `EnterGuard values dropped out of order`
+
+兼容性结论：
+
+- **不影响现有导出符号**
+- **不影响头文件**
+- **不要求调用方修改现有函数签名或参数结构**
+- **不影响 gRPC 服务模式**
+- **不影响 Rust 直接嵌入 `lib` API 的调用方式**
+
+需要注意的一点是：
+
+- FFI 调用入口现在会在 worker 线程上串行调度
+- 因此极端高并发 FFI 宿主的跨线程并行吞吐，理论上可能低于旧实现
+- 但换来的是更稳定的运行时生命周期与跨语言集成行为
+
+如果需要完整背景、调用模型和集成影响说明，请继续参考：
+
+- [docs/LIBRARY_USAGE.zh-CN.md](./docs/LIBRARY_USAGE.zh-CN.md)
+
 更完整的内容包括：
 
 - 动态库产物路径
