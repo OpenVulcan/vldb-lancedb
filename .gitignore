@@ -1,0 +1,10 @@
+target/
+_tmp_data/
+data/
+dist/
+*.arrow.stream
+*.log
+*.exe
+*.pdb
+/docs/plan/
+/docs/completed/

@@ -1,0 +1,18 @@
+{
+  "host": "127.0.0.1",
+  "port": 19301,
+  "db_path": "./data",
+  "read_consistency_interval_ms": 0,
+  "logging": {
+    "enabled": true,
+    "file_enabled": true,
+    "stderr_enabled": true,
+    "request_log_enabled": true,
+    "slow_request_log_enabled": true,
+    "slow_request_threshold_ms": 1000,
+    "include_request_details_in_slow_log": true,
+    "request_preview_chars": 160,
+    "log_dir": "",
+    "log_file_name": "vldb-lancedb.log"
+  }
+}

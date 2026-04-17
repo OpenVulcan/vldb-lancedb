@@ -1,0 +1,9 @@
+.git
+target
+data
+_tmp_data
+examples
+*.log
+*.arrow.stream
+Dockerfile*
+**/.DS_Store
