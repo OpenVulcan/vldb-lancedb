@@ -4,6 +4,28 @@ version = "0.1.5"
 edition = "2024"
 rust-version = "1.94"
 build = "build.rs"
+description = "A Rust gRPC, library, and FFI gateway for LanceDB vector data with JSON and Arrow IPC support."
+license = "MIT"
+repository = "https://github.com/OpenVulcan/vldb-lancedb"
+homepage = "https://github.com/OpenVulcan/vldb-lancedb"
+documentation = "https://docs.rs/vldb-lancedb"
+readme = "README.md"
+keywords = ["lancedb", "vector", "grpc", "ffi", "arrow"]
+categories = ["database", "network-programming"]
+include = [
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/LICENSE",
+    "/README.md",
+    "/build.rs",
+    "/src/**",
+    "/proto/**",
+    "/include/**",
+    "/docs/README.en.md",
+    "/docs/README.zh-CN.md",
+    "/docs/LIBRARY_USAGE.zh-CN.md",
+    "/vldb-lancedb.json.example",
+]
 
 [lib]
 name = "vldb_lancedb"
