@@ -35,9 +35,9 @@ on:
       linux_x64:
         description: "[vldb-lancedb] Linux x64 runner"
         required: true
-        default: "9950x"
+        default: "ubuntu-24.04"
         type: choice
-        options: [ "9950x", "proart", "ubuntu-24.04" ]
+        options: [ "ubuntu-24.04", "9950x", "proart" ]
       linux_arm:
         description: "[vldb-lancedb] Linux ARM runner"
         required: true
@@ -59,9 +59,9 @@ on:
       win_x64:
         description: "[vldb-lancedb] Windows x64 runner"
         required: true
-        default: "9950x-win"
+        default: "windows-latest"
         type: choice
-        options: [ "9950x-win", "proart-win", "windows-latest" ]
+        options: [ "windows-latest", "9950x-win", "proart-win" ]
 permissions:
   contents: write
 
@@ -263,7 +263,6 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
-          vsversion: '2022'
 
       - name: Build release binary and library artifacts
         env:
